@@ -223,6 +223,15 @@ class FtpClient(ftplib.FTP_TLS):
             print(log2)
             print(log3)
 
+    def filename_parsing(self, str_list, str_idx):
+        _str=''
+        for idx, str_tmp in enumerate(str_list):
+            if (idx>str_idx):
+                _str+=' '
+            if (idx>=str_idx):
+                _str+=str_tmp
+        return _str
+
     def remote_connect(self):
         self.access_status = -1
         status = -1
@@ -294,6 +303,8 @@ class FtpClient(ftplib.FTP_TLS):
             # login - secure = False (FTP)
             # login - secure = True (FTP_TLS)
             msg = self.login(user=self.username, passwd=self.password, secure=self.secure)
+            self.encoding='utf-8' # ftplib encoding (Latin-1 -> UTF-8)
+            self.sendcmd('OPTS UTF8 ON')
             if __name__ != '__main__':
                 orisolLog(
                     level='info',
@@ -455,6 +466,8 @@ class FtpClient(ftplib.FTP_TLS):
             orisolLog(level='debug', module_name=Module_Name,
                       message='get file list:%s' % (cmd))
         try:
+            self.sendcmd('OPTS UTF8 ON')
+            #lines=''
             with Capturing() as lines:
                 self.retrlines(cmd)
             status = 0
@@ -487,13 +500,13 @@ class FtpClient(ftplib.FTP_TLS):
                     file_tmp = ' '.join(line[11:].split()).split(' ')
                     if file_permissions[0] == 'd':
                         file_attribute['file_type'] = 'DIR'
-                        file_attribute['file_name'] = file_tmp[7]
+                        file_attribute['file_name'] = self.filename_parsing(file_tmp,7)
                         file_attribute['file_path'] = os.path.join(
                             search_path, file_attribute['file_name']
                         )
                     elif file_permissions[0] == 'l':
                         file_attribute['file_type'] = 'SYMLINK'
-                        file_attribute['file_name'] = file_tmp[7]
+                        file_attribute['file_name'] = self.filename_parsing(file_tmp,7)
                         file_attribute['file_path'] = os.path.join(
                             search_path, file_attribute['file_name']
                         )
@@ -501,7 +514,7 @@ class FtpClient(ftplib.FTP_TLS):
                         file_attribute['file_type'] = (
                             os.path.splitext(file_tmp[7])[1]
                         )[1:].upper()
-                        file_attribute['file_name'] = os.path.split(file_tmp[7])[1]
+                        file_attribute['file_name'] = self.filename_parsing(file_tmp,7)
                         file_attribute['file_path'] = os.path.join(
                             search_path, file_attribute['file_name']
                         )
