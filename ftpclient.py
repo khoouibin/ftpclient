@@ -3,10 +3,14 @@ from time import sleep, time
 import json
 import os
 from io import StringIO
-import ftplib, socket, ssl
+import ftplib
+import socket
+import ssl
 from ftplib import error_perm
 import threading
-import shutil, math, json
+import shutil
+import math
+import json
 
 if __name__ != '__main__':
     try:
@@ -17,25 +21,32 @@ if __name__ != '__main__':
         logger_import_message = 'reference orisol log interface from uhf_host_file_manager'
     print(logger_import_message)
 
+
 def synchronized(func):
     func.__lock__ = threading.RLock()
 
     def lock_func(*args, **kwargs):
         with func.__lock__:
+            # print('----lock',func.__name__)
             return func(*args, **kwargs)
 
     return lock_func
 
+
 UNITS_MAPPING = [
-    (1<<50, ' PB'),
-    (1<<40, ' TB'),
-    (1<<30, ' GB'),
-    (1<<20, ' MB'),
-    (1<<10, ' KB'),
+    (1 << 50, ' PB'),
+    (1 << 40, ' TB'),
+    (1 << 30, ' GB'),
+    (1 << 20, ' MB'),
+    (1 << 10, ' KB'),
     (1, (' byte', ' bytes')),
 ]
 
 Module_Name = 'FtpClient'
+
+g_conn_detection_event = threading.Event()
+g_conn_detection_mutex = threading.Lock()
+
 
 def pretty_size(bytes, units=UNITS_MAPPING):
     """Get human-readable file sizes.
@@ -53,6 +64,7 @@ def pretty_size(bytes, units=UNITS_MAPPING):
         else:
             suffix = multiple
     return str(amount) + suffix
+
 
 class Capturing(list):
     def __enter__(self):
@@ -113,16 +125,17 @@ class BulkTag():
         return self.src_mount
 
     def get_dst_mount(self):
-        return self.dst_mount  
+        return self.dst_mount
 
     def get_mounts(self):
         return self.src_mount, self.dst_mount
-    
+
     def get_length_src_filelist(self):
         return len(self.src_filename_list)
 
     def get_length_dst_filelist(self):
         return len(self.dst_filename_list)
+
 
 class FtpClient(ftplib.FTP_TLS):
     # class FtpClient(ftplib.FTP):
@@ -144,7 +157,7 @@ class FtpClient(ftplib.FTP_TLS):
     password = ''
     port = 21
     debug_level = 1
-    timeout = 5
+    conn_timeout = 5
 
     secure = True
     implicit_TLS = False
@@ -153,6 +166,7 @@ class FtpClient(ftplib.FTP_TLS):
     working_directory = {'remote': '/',
                          'local_backup': '/'}
     __is_login = False
+    __is_working_directory = False
     local_current_directory = os.getcwd()
     local_tmp_directory = os.getcwd()
     continuous_file_numbers = 128
@@ -178,7 +192,10 @@ class FtpClient(ftplib.FTP_TLS):
                        local_tmp_directory=os.getcwd(),
                        port=21,
                        secure=True,
-                       implicit_TLS=False):
+                       implicit_TLS=False,
+                       working_root='/',
+                       connect_timeout=5,
+                       ):
         self.host = host
         self.username = username
         self.password = password
@@ -187,9 +204,13 @@ class FtpClient(ftplib.FTP_TLS):
         self.local_tmp_directory = local_tmp_directory
         self.implicit_TLS = implicit_TLS
         self.secure = secure
+        self.working_root = working_root
+        self.__is_login = False
+        self.__is_working_directory = False
+        self.conn_timeout = connect_timeout
 
         log1 = (
-            'host:%s,username=%s,password=%s,port=%d,implicit_TLS=%d,secure=%d'
+            'host:%s,username=%s, password=%s, port=%d, implicit_TLS=%d, secure=%d'
             % (
                 self.host,
                 self.username,
@@ -200,12 +221,19 @@ class FtpClient(ftplib.FTP_TLS):
             )
         )
         log2 = (
+            'working_root:%s, conn_timeout=%d'
+            % (
+                self.working_root,
+                self.conn_timeout,
+            )
+        )
+        log3 = (
             'local_current_directory=%s'
             % (
                 self.local_current_directory,
             )
         )
-        log3 = (
+        log4 = (
             'local_tmp_directory=%s'
             % (
                 self.local_tmp_directory,
@@ -213,23 +241,31 @@ class FtpClient(ftplib.FTP_TLS):
         )
         if __name__ != '__main__':
             orisolLog(
-                level='info', module_name=Module_Name, message='init_parameter:%s' % (log1))
+                level='info', module_name=Module_Name, message='params:%s' % (log1))
             orisolLog(
-                level='info', module_name=Module_Name, message='init_parameter:%s' % (log2))
+                level='info', module_name=Module_Name, message='params:%s' % (log2))
             orisolLog(
-                level='info', module_name=Module_Name, message='init_parameter:%s' % (log3))
+                level='info', module_name=Module_Name, message='params:%s' % (log3))
+            orisolLog(
+                level='info', module_name=Module_Name, message='params:%s' % (log4))
         else:
             print(log1)
             print(log2)
             print(log3)
+            print(log4)
 
-    def filename_parsing(self, str_list, str_idx):
-        _str=''
+    def filename_parsing(self, str_list, str_idx, attr=None):
+        _str = ''
         for idx, str_tmp in enumerate(str_list):
-            if (idx>str_idx):
-                _str+=' '
-            if (idx>=str_idx):
-                _str+=str_tmp
+            if (idx > str_idx):
+                _str += ' '
+            if (idx >= str_idx):
+                _str += str_tmp
+
+        if attr != None and attr == 'l':
+            _str_link = _str.split('->')[0]
+            _str = "".join(_str_link.rstrip().lstrip())
+
         return _str
 
     def remote_connect(self):
@@ -253,7 +289,7 @@ class FtpClient(ftplib.FTP_TLS):
                     orisolLog(level='info', module_name=Module_Name,
                               message='remote connect:%s' % (msg),)
                 status = 0
-            except error_perm as err:
+            except (error_perm, socket.error) as err:
                 if __name__ != '__main__':
                     orisolLog(level='error', module_name=Module_Name,
                               message='remote connect:%s' % (str(err)),)
@@ -267,17 +303,17 @@ class FtpClient(ftplib.FTP_TLS):
         else:
             try:
                 msg = self.connect(
-                    host=self.host, timeout=self.timeout, port=self.port)
+                    host=self.host, timeout=self.conn_timeout, port=self.port)
                 if __name__ != '__main__':
                     orisolLog(level='info', module_name=Module_Name,
                               message='remote connect:%s' % (msg),)
                 status = 0
-            except Exception as err:
+            except (Exception, socket.error) as err:
                 if __name__ != '__main__':
                     orisolLog(level='error', module_name=Module_Name,
                               message='remote connect:%s' % (str(err)),)
                 else:
-                    print('error:', err)
+                    print('connect error:', err)
                 msg = str(err)
 
             finally:
@@ -287,24 +323,11 @@ class FtpClient(ftplib.FTP_TLS):
 
     def remote_login(self):
         status = -1
-        msg = ''
-        try:
-            ret = self.prot_p()
-        except error_perm as err:
-            if __name__ != '__main__':
-                orisolLog(
-                    level='error',
-                    module_name=Module_Name,
-                    message='remote login:%s' % (str(err)),)
-            else:
-                print('remote_login prot_p-err:', str(err))
-
         try:
             # login - secure = False (FTP)
             # login - secure = True (FTP_TLS)
-            msg = self.login(user=self.username, passwd=self.password, secure=self.secure)
-            self.encoding='utf-8' # ftplib encoding (Latin-1 -> UTF-8)
-            self.sendcmd('OPTS UTF8 ON')
+            msg = self.login(user=self.username,
+                             passwd=self.password, secure=self.secure)
             if __name__ != '__main__':
                 orisolLog(
                     level='info',
@@ -314,7 +337,7 @@ class FtpClient(ftplib.FTP_TLS):
             self.access_status = 0
             self.access_timestamp = time()
             status = 0
-        except error_perm as err:
+        except (error_perm, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(
                     level='error',
@@ -327,64 +350,156 @@ class FtpClient(ftplib.FTP_TLS):
             pass
         return status, msg
 
-    def remote_open(self):
+    def remote_auth(self):
+        try:
+            ret = self.auth()
+        except (error_perm, socket.error) as err:
+            if __name__ != '__main__':
+                orisolLog(
+                    level='error',
+                    module_name=Module_Name,
+                    message='AUTH:%s' % (str(err)),)
+            else:
+                print('AUTH-err:', str(err))
+
+    def remote_prot_p(self):
+        try:
+            ret = self.prot_p()
+        except (error_perm, socket.error) as err:
+            if __name__ != '__main__':
+                orisolLog(
+                    level='error',
+                    module_name=Module_Name,
+                    message='PBSZ:%s' % (str(err)),)
+            else:
+                print('PBSZ prot_p-err:', str(err))
+
+    def remote_extension_support(self):
+        status = -1
+        try:
+            str_resp = self.sendcmd('FEAT').split('\n')
+            str_resp = [s.strip() for s in str_resp]
+            if __name__ != '__main__':
+                orisolLog(
+                    level='info',
+                    module_name=Module_Name,
+                    message='extension:%s' % (str(str_resp),))
+            else:
+                print('support extions:', str(str_resp))
+            if any("UTF8" in s for s in str_resp):
+                self.encoding = 'utf-8'  # ftplib encoding (Latin-1 -> UTF-8)
+                self.sendcmd('OPTS UTF8 ON')
+
+            status = 0
+
+        except (error_perm, socket.error) as err:
+            if __name__ != '__main__':
+                orisolLog(
+                    level='error',
+                    module_name=Module_Name,
+                    message='extension_support err:%s' % (str(err)),)
+            else:
+                print('extension_support err:', str(err))
+        return status
+
+    def remote_open(self, change_to_backup=False):
         status = -1
         msg = ''
         welcome = ''
-        status, welcome = self.remote_connect()
+        conn_msg = ''
+        status, conn_msg = self.remote_connect()
         if status == 0:
+            if self.secure == True and self.implicit_TLS == False:
+                self.remote_prot_p()
             status, msg = self.remote_login()
+            status = self.remote_extension_support()
 
-            if self.__is_login == False:
-                self.__is_login = True
+        #     if self.__is_login == False:
+        #         self.__is_login = True
+        #         self.working_directory['remote'] = self.remote_pwd()[1]
+        #         self.working_directory['local_backup'] = self.working_directory['remote']
+        # else:
+        #     msg = conn_msg
+
+        # if status == 0:
+        #     if self.__is_working_directory == False:
+        #         status, msg = self.remote_change_current_folder(cwd=self.working_root)
+        #         if status == 0:
+        #             self.__is_working_directory = True
+        #             self.working_directory['remote'] = self.remote_pwd()[1]
+        #             self.working_directory['local_backup'] = self.working_directory['remote']
+        #     else:
+        #         if change_to_backup == True:
+        #             status, msg = self.remote_change_current_folder(cwd=self.working_directory['local_backup'])
+
+        # because, ui-filemanager click ftp button (in the left hand side), it's meaning to refresh ftp file list,
+        # and back to original working path, ignore where ever the current working path.
+
+            self.__is_login = True
+            self.working_directory['remote'] = self.remote_pwd()[1]
+            self.working_directory['local_backup'] = self.working_directory['remote']
+        else:
+            msg = conn_msg
+
+        # change to working-path
+        if status == 0:
+            if change_to_backup == False:
+                status, msg = self.remote_change_current_folder(
+                    cwd=self.working_root)
+                if status == 0:
+                    self.__is_working_directory = True
+                    self.working_directory['remote'] = self.remote_pwd()[1]
+                    self.working_directory['local_backup'] = self.working_directory['remote']
+            else:
+                status, msg = self.remote_change_current_folder(
+                    cwd=self.working_directory['local_backup'])
                 self.working_directory['remote'] = self.remote_pwd()[1]
-                self.working_directory['local_backup'] = self.working_directory['remote']
+        if status == 0:
+            welcome = conn_msg
         return status, msg, welcome
 
     def remote_close(self):
         self.close()
         return 0
 
-    def update_access_status(self, status=0):
+    def reset_timeout_count(self, status=0):
         self.access_timestamp = time()
         self.access_status = status
 
-    def Is_need_reconnect(self):
-        b_reconnect = False
+    def Is_timeout_reconnect(self):
         if self.access_status == -1:
-            b_reconnect = True
+            return True
+
+        if (time() - self.access_timestamp) > self.access_diff:
+            return True
         else:
-            if (time() - self.access_timestamp) > self.access_diff:
-                b_reconnect = True
-            else:
-                b_reconnect = False
-        return b_reconnect
+            return False
 
     def remote_quit(self):
+        if self.__is_login == False:
+            return
         try:
-            self.voidcmd('NOOP')
             self.quit()
             self.access_status = -1
-        except Exception as e:
+        except (Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='error', module_name=Module_Name,
-                          message='remote_quit err:%s' % (e))
+                          message='remote_quit err:%s' % (err))
         finally:
             pass
 
-    @synchronized
     def remote_noop(self):
         status = -1
         try:
             self.voidcmd('NOOP')
             status = 0
-            self.update_access_status()
-        except Exception as e:
+            self.reset_timeout_count()
+        except (Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='error', module_name=Module_Name,
-                          message='remote_noop err:%s' % (e))
+                          message='remote_noop err:%s' % (err))
             else:
-                print(e)
+                print(err)
         finally:
             return status
 
@@ -395,10 +510,10 @@ class FtpClient(ftplib.FTP_TLS):
         try:
             msg = self.getwelcome()
             status = 0
-        except (error_perm, Exception) as err:
+        except (error_perm, Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='error', module_name=Module_Name,
-                          message='remote_welcome err:%s'%str(err))
+                          message='remote_welcome err:%s' % str(err))
             msg = str(err)
         finally:
             pass
@@ -410,15 +525,15 @@ class FtpClient(ftplib.FTP_TLS):
         msg = ''
         if self.access_status == 0:
             try:
-                self.update_access_status()
+                self.reset_timeout_count()
                 msg = self.pwd()
                 status = 0
-            except (error_perm, Exception) as err:
+            except (error_perm, Exception, socket.error) as err:
                 if __name__ != '__main__':
                     orisolLog(
                         level='error',
                         module_name=Module_Name,
-                        message='pwd err:%s'%(str(err)))
+                        message='pwd err:%s' % (str(err)))
                 else:
                     print(err)
                 msg = str(err)
@@ -466,23 +581,25 @@ class FtpClient(ftplib.FTP_TLS):
             orisolLog(level='debug', module_name=Module_Name,
                       message='get file list:%s' % (cmd))
         try:
-            self.sendcmd('OPTS UTF8 ON')
-            #lines=''
+            # -debug
+            # lines=''
+            # self.retrlines(cmd)
+
             with Capturing() as lines:
                 self.retrlines(cmd)
             status = 0
-        except (error_perm, Exception) as e:
+        except (error_perm, Exception, socket.error) as err:
             err_msg = str(e)
             if __name__ != '__main__':
                 orisolLog(level='error', module_name=Module_Name,
-                          message='remote_get_file_list:%s' % (str(e)),)
+                          message='remote_get_file_list:%s' % (str(err)),)
             else:
-                print('remote-list err:', e)
+                print('remote-list err:', err)
 
         finally:
             self.set_debuglevel(self.debug_level)
             if status == 0 and pwd_status == 0:
-                self.update_access_status()
+                self.reset_timeout_count()
                 for line in lines:
                     if bool([ele for ele in ignore_msg if (ele in line)]):
                         continue
@@ -500,13 +617,15 @@ class FtpClient(ftplib.FTP_TLS):
                     file_tmp = ' '.join(line[11:].split()).split(' ')
                     if file_permissions[0] == 'd':
                         file_attribute['file_type'] = 'DIR'
-                        file_attribute['file_name'] = self.filename_parsing(file_tmp,7)
+                        file_attribute['file_name'] = self.filename_parsing(
+                            file_tmp, 7)
                         file_attribute['file_path'] = os.path.join(
                             search_path, file_attribute['file_name']
                         )
                     elif file_permissions[0] == 'l':
                         file_attribute['file_type'] = 'SYMLINK'
-                        file_attribute['file_name'] = self.filename_parsing(file_tmp,7)
+                        file_attribute['file_name'] = self.filename_parsing(
+                            file_tmp, 7, attr='l')
                         file_attribute['file_path'] = os.path.join(
                             search_path, file_attribute['file_name']
                         )
@@ -514,13 +633,15 @@ class FtpClient(ftplib.FTP_TLS):
                         file_attribute['file_type'] = (
                             os.path.splitext(file_tmp[7])[1]
                         )[1:].upper()
-                        file_attribute['file_name'] = self.filename_parsing(file_tmp,7)
+                        file_attribute['file_name'] = self.filename_parsing(
+                            file_tmp, 7)
                         file_attribute['file_path'] = os.path.join(
                             search_path, file_attribute['file_name']
                         )
                     file_attribute['file_permissions'] = file_permissions
                     file_attribute['file_size'] = int(file_tmp[3])
-                    file_attribute['size_human'] = pretty_size(int(file_tmp[3]))
+                    file_attribute['size_human'] = pretty_size(
+                        int(file_tmp[3]))
                     str_date = ''
                     if ':' in file_tmp[6]:
                         str_date += '----'
@@ -536,7 +657,7 @@ class FtpClient(ftplib.FTP_TLS):
                     # if status == 0:
                     #     file_attribute['date'] = str_date
                     remote_list.append(file_attribute)
-                    sorted(remote_list, key = lambda x:['file_name'])
+                    sorted(remote_list, key=lambda x: ['file_name'])
                 return status, remote_list
             else:
                 return status, err_msg
@@ -555,16 +676,16 @@ class FtpClient(ftplib.FTP_TLS):
         try:
             with Capturing() as lines:
                 self.sendcmd(cmd)
-        except Exception as e:
-            err_msg = e
+
+        except (Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(
                     level='error',
                     module_name=Module_Name,
-                    message='remote-mdtm:%s-%s' % (search_path, e),
+                    message='remote-mdtm:%s-%s' % (search_path, err),
                 )
             else:
-                print('remote-mdtm err: %s, %s' % (search_path, e))
+                print('remote-mdtm err: %s, %s' % (search_path, err))
 
         finally:
             self.set_debuglevel(self.debug_level)
@@ -585,8 +706,8 @@ class FtpClient(ftplib.FTP_TLS):
         try:
             msg = self.mkd(path_name)
             status = 0
-            self.update_access_status()
-        except (error_perm, Exception) as err:
+            self.reset_timeout_count()
+        except (error_perm, Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='info', module_name=Module_Name,
                           message='mkdir err:%s' % (str(err)))
@@ -604,8 +725,8 @@ class FtpClient(ftplib.FTP_TLS):
         try:
             msg = self.rmd(path_name)
             status = 0
-            self.update_access_status()
-        except (error_perm, Exception) as err:
+            self.reset_timeout_count()
+        except (error_perm, Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='info', module_name=Module_Name,
                           message='rmdir err:%s' % (str(err)))
@@ -623,8 +744,8 @@ class FtpClient(ftplib.FTP_TLS):
         try:
             msg = self.delete(file_name)
             status = 0
-            self.update_access_status()
-        except (error_perm, Exception) as err:
+            self.reset_timeout_count()
+        except (error_perm, Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='info', module_name=Module_Name,
                           message='rmfile err:%s' % (str(err)))
@@ -642,8 +763,8 @@ class FtpClient(ftplib.FTP_TLS):
         try:
             msg = self.rename(old_name, new_name)
             status = 0
-            self.update_access_status()
-        except (error_perm, Exception) as err:
+            self.reset_timeout_count()
+        except (error_perm, Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='info', module_name=Module_Name,
                           message='rename err:%s' % (str(err)))
@@ -678,9 +799,9 @@ class FtpClient(ftplib.FTP_TLS):
         try:
             msg = self.cwd(tmp_cwd)
             status = 0
-            self.update_access_status()
+            self.reset_timeout_count()
 
-        except error_perm as err:
+        except (error_perm, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='info', module_name=Module_Name,
                           message='cwd err:%s' % (str(err)))
@@ -703,16 +824,16 @@ class FtpClient(ftplib.FTP_TLS):
             if '250' in str_resp:
                 status = 0
                 msg = str_resp
-                self.update_access_status()
-        except error_perm as err_msg:
+                self.reset_timeout_count()
+        except (error_perm, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(
                     level='error',
                     module_name=Module_Name,
-                    message='cdup error:%s' % (err_msg))
+                    message='cdup error:%s' % (err))
             else:
-                print('cdup error:', err_msg)
-                msg = str(err_msg)
+                print('cdup error:', err)
+                msg = str(err)
         finally:
             pass
         return status, msg
@@ -777,7 +898,8 @@ class FtpClient(ftplib.FTP_TLS):
         else:
             path_1, path_2 = os.path.split(folder_name)
             if path_1 == '':
-                new_path = os.path.join(self.local_current_directory, folder_name)
+                new_path = os.path.join(
+                    self.local_current_directory, folder_name)
             else:
                 new_path = os.path.join(path_1, path_2)
 
@@ -788,8 +910,8 @@ class FtpClient(ftplib.FTP_TLS):
             else:
                 print('set_local_current_folder not exist')
 
-        except Exception as e:
-            print('set_local_current_folder err:', e)
+        except (Exception, socket.error) as err:
+            print('set_local_current_folder err:', err)
 
         finally:
             print(
@@ -798,7 +920,18 @@ class FtpClient(ftplib.FTP_TLS):
             return status
 
     def print_info_working_dir(self):
-        print('-working_directory-info:',self.working_directory)
+        print('-working_directory-info:', self.working_directory)
+
+    def get_remote_folder_info(self):
+        folder_info = {'remote_pwd': '',
+                       'working_directory': self.working_directory,
+                       'local_directory': self.local_current_directory,
+                       'ftp_tmp_directory': self.local_tmp_directory,
+                       }
+        status, remote_pwd = self.remote_pwd()
+        if status == 0:
+            folder_info['remote_pwd'] = remote_pwd
+        return status, folder_info
 
     @synchronized
     def set_bulktag_upload_info_cli(self, src_files, dst_mount):
@@ -808,9 +941,9 @@ class FtpClient(ftplib.FTP_TLS):
             src_mount, filename = os.path.split(file)
             file_list.append(filename)
         self.set_bulktag_info(src_mount=src_mount,
-                                         dst_mount=dst_mount,
-                                         src_filenamelist=file_list,
-                                         dst_filenamelist=file_list)
+                              dst_mount=dst_mount,
+                              src_filenamelist=file_list,
+                              dst_filenamelist=file_list)
 
     @synchronized
     def set_bulktag_download_info_cli(self, src_files, dst_mount):
@@ -821,9 +954,9 @@ class FtpClient(ftplib.FTP_TLS):
                 src_mount, filename = os.path.split(file['file_path'])
                 file_list.append(filename)
         self.set_bulktag_info(src_mount=src_mount,
-                                         dst_mount=dst_mount,
-                                         src_filenamelist=file_list,
-                                         dst_filenamelist=file_list)
+                              dst_mount=dst_mount,
+                              src_filenamelist=file_list,
+                              dst_filenamelist=file_list)
 
     @synchronized
     def set_bulktag_info(self, dst_filenamelist=None, dst_mount=None,
@@ -870,8 +1003,7 @@ class FtpClient(ftplib.FTP_TLS):
 
         escape_time = time() - start_time
         if mass_transmmit_status == 0:
-            status, msg, welcome = self.remote_open()
-            status, msg = self.remote_change_current_folder(self.working_directory['local_backup'])
+            status, msg, welcome = self.remote_open(change_to_backup=True)
         return mass_transmmit_status, escape_time, err_msg
 
     @synchronized
@@ -910,8 +1042,7 @@ class FtpClient(ftplib.FTP_TLS):
 
         escape_time = time() - start_time
         if mass_transmmit_status == 0:
-            status, msg, welcome = self.remote_open()
-            status, msg = self.remote_change_current_folder(self.working_directory['local_backup'])
+            status, msg, welcome = self.remote_open(change_to_backup=True)
         return mass_transmmit_status, escape_time, err_msg
 
     @synchronized
@@ -933,7 +1064,8 @@ class FtpClient(ftplib.FTP_TLS):
                 if idx >= self.bulktag.get_length_dst_filelist():
                     mass_transmmit_status = 0
                     break
-                dst_filepath = os.path.join(self.bulktag.get_dst_mount(),self.bulktag.get_dst_filename_by_index())
+                dst_filepath = os.path.join(
+                    self.bulktag.get_dst_mount(), self.bulktag.get_dst_filename_by_index())
                 status, msg = self.remote_rmfile(dst_filepath)
                 if status == 0:
                     idx += 1
@@ -949,8 +1081,7 @@ class FtpClient(ftplib.FTP_TLS):
 
         escape_time = time() - start_time
         if mass_transmmit_status == 0:
-            status, msg, welcome = self.remote_open()
-            status, msg = self.remote_change_current_folder(self.working_directory['local_backup'])
+            status, msg, welcome = self.remote_open(change_to_backup=True)
         return mass_transmmit_status, escape_time, err_msg
 
     @synchronized
@@ -972,7 +1103,7 @@ class FtpClient(ftplib.FTP_TLS):
                     mass_transmmit_status = 0
                     break
                 status, msg = self.remote_rename(old_name=self.bulktag.get_src_filename_by_index(),
-                                                  new_name=self.bulktag.get_dst_filename_by_index())
+                                                 new_name=self.bulktag.get_dst_filename_by_index())
                 if status == 0:
                     idx += 1
                     self.bulktag.set_index(index=idx)
@@ -987,8 +1118,7 @@ class FtpClient(ftplib.FTP_TLS):
 
         escape_time = time() - start_time
         if mass_transmmit_status == 0:
-            status, msg, welcome = self.remote_open()
-            status, msg = self.remote_change_current_folder(self.working_directory['local_backup'])
+            status, msg, welcome = self.remote_open(change_to_backup=True)
         return mass_transmmit_status, escape_time, err_msg
 
     @synchronized
@@ -1001,7 +1131,8 @@ class FtpClient(ftplib.FTP_TLS):
         remote_filepath = ''
         remote_dir = ''
         if src_mount == None:
-            local_filepath = os.path.join(self.local_current_directory, src_filename)
+            local_filepath = os.path.join(
+                self.local_current_directory, src_filename)
         else:
             local_filepath = os.path.join(src_mount, src_filename)
         if not os.path.isfile(local_filepath):
@@ -1009,10 +1140,12 @@ class FtpClient(ftplib.FTP_TLS):
         if dst_mount != None and dst_mount[0] != '/':
             dst_mount = '/'+dst_mount[:]
         if dst_mount == None and dst_filename == None:
-            remote_filepath = os.path.join(self.working_directory['local_backup'], src_filename)
+            remote_filepath = os.path.join(
+                self.working_directory['local_backup'], src_filename)
             remote_dir = self.working_directory['local_backup']
         elif dst_mount == None and dst_filename != None:
-            remote_filepath = os.path.join(self.working_directory['local_backup'], dst_filename)
+            remote_filepath = os.path.join(
+                self.working_directory['local_backup'], dst_filename)
             remote_dir = self.working_directory['local_backup']
         elif dst_mount != None and dst_filename == None:
             remote_filepath = os.path.join(dst_mount, src_filename)
@@ -1025,13 +1158,13 @@ class FtpClient(ftplib.FTP_TLS):
             cmd = 'STOR %s' % (remote_filepath)
             msg = self.storbinary(cmd, fp=local_f, blocksize=bufsize)
             status = 0
-        except (error_perm, Exception) as err_msg:
+        except (error_perm, Exception, socket.error) as err:
             if __name__ != '__main__':
                 orisolLog(level='info', module_name=Module_Name,
-                          message='remote_upload err:%s' % (str(err_msg)))
+                          message='remote_upload err:%s' % (str(err)))
             else:
-                print('remote_upload err:', err_msg)
-            msg = str(err_msg)
+                print('remote_upload err:', err)
+            msg = str(err)
         finally:
             local_f.close()
             return status, msg
@@ -1045,15 +1178,18 @@ class FtpClient(ftplib.FTP_TLS):
         local_filepath = ''
         remote_filepath = ''
         if src_mount == None:
-            remote_filepath = os.path.join(self.working_directory['local_backup'], src_filename)
+            remote_filepath = os.path.join(
+                self.working_directory['local_backup'], src_filename)
         else:
             remote_filepath = os.path.join(src_mount, src_filename)
         if dst_mount != None and dst_mount[0] != '/':
             dst_mount = '/'+dst_mount[:]
         if dst_mount == None and dst_filename == None:
-            local_filepath = os.path.join(self.local_current_directory, src_filename)
+            local_filepath = os.path.join(
+                self.local_current_directory, src_filename)
         elif dst_mount == None and dst_filename != None:
-            local_filepath = os.path.join(self.local_current_directory, dst_filename)
+            local_filepath = os.path.join(
+                self.local_current_directory, dst_filename)
         elif dst_mount != None and dst_filename == None:
             local_filepath = os.path.join(dst_mount, src_filename)
         elif dst_mount != None and dst_filename != None:
@@ -1065,14 +1201,14 @@ class FtpClient(ftplib.FTP_TLS):
             cmd = 'RETR %s' % (remote_filepath)
             msg = self.retrbinary(cmd, local_f.write, blocksize=bufsize)
             status = 0
-        except (error_perm, Exception) as err_msg:
+        except (error_perm, Exception, socket.error) as err:
             status = -1
             if __name__ != '__main__':
                 orisolLog(level='info', module_name=Module_Name,
-                          message='remote_download err:%s' % (str(err_msg)))
+                          message='remote_download err:%s' % (str(err)))
             else:
-                print(err_msg)
-            msg = str(err_msg)
+                print(err)
+            msg = str(err)
         finally:
             local_f.close()
             if status == -1:
@@ -1140,9 +1276,7 @@ class FtpClient(ftplib.FTP_TLS):
             mass_transmmit_status = 0
         escape_time = time() - start_time
         if mass_transmmit_status == 0:
-            status, msg, welcome = self.remote_open()
-            status, msg = self.remote_change_current_folder(
-                self.working_directory['local_backup'])
+            status, msg, welcome = self.remote_open(change_to_backup=True)
         return mass_transmmit_status, escape_time, err_msg
 
     def recursively_download(self, src, dst):
@@ -1202,9 +1336,7 @@ class FtpClient(ftplib.FTP_TLS):
             mass_transmmit_status = 0
         escape_time = time() - start_time
         if mass_transmmit_status == 0:
-            status, msg, welcome = self.remote_open()
-            status, msg = self.remote_change_current_folder(
-                self.working_directory['local_backup'])
+            status, msg, welcome = self.remote_open(change_to_backup=True)
         return mass_transmmit_status, escape_time, err_msg
 
     def recursively_remove(self, dst):
@@ -1250,9 +1382,7 @@ class FtpClient(ftplib.FTP_TLS):
 
         escape_time = time() - start_time
         if mass_transmmit_status == 0:
-            status, msg, welcome = self.remote_open()
-            status, msg = self.remote_change_current_folder(
-                self.working_directory['local_backup'])
+            status, msg, welcome = self.remote_open(change_to_backup=True)
         return mass_transmmit_status, escape_time, err_msg
 
     def local_recursively_copy(self, src, dst):
@@ -1282,6 +1412,11 @@ class FtpClient(ftplib.FTP_TLS):
                     os.remove(sub_dst)
         return status
 
+    def remote_command(self, str_command):
+        str_resp = self.sendcmd(str_command)
+        self.reset_timeout_count()
+        return str_resp
+
 
 def cli_help():
     help_doc = ''
@@ -1291,6 +1426,7 @@ def cli_help():
     help_doc += '    (2) tx hex 12 34 56 78'+os.linesep
     help_doc += 'set lc12s -setting parameter for lc12s'
     print(help_doc)
+
 
 class FtpProbe(threading.Thread):
     def __init__(self):
@@ -1312,9 +1448,9 @@ class FtpProbe(threading.Thread):
     def quit(self):
         self.cond.acquire()
         self.cond.notify()
-        self.cond.release() 
-        self.stop_event.set()   
-        
+        self.cond.release()
+        self.stop_event.set()
+
     def enable(self, command):
         if isinstance(command, bool):
             self.is_enable = command
@@ -1325,6 +1461,7 @@ class FtpProbe(threading.Thread):
                 self.cond.release()
 
     def run(self):
+        print('probe-run')
         while True:
             if self.is_enable == False:
                 self.cond.acquire()
@@ -1334,44 +1471,127 @@ class FtpProbe(threading.Thread):
             noop_status = self.ftpclient.remote_noop()
             if noop_status == 0:
                 self.interval = 10
-            print('FtpProbe-noop:',time())
+            print('FtpProbe-noop:', time())
             self.stop_event.wait(self.interval)
             if self.stop_event.is_set():
                 break
 
+
+class FtpConnDetect(threading.Thread):
+    def __init__(self):
+        super(FtpConnDetect, self).__init__()
+        self.is_conn = False
+        self.is_pause = False
+        self.ftpclient = FtpClient()
+        self.quit_event = threading.Event()
+
+    def __new__(cls, *args, **kw):
+        if not hasattr(cls, '_instance'):
+            cls._instance = super(FtpConnDetect,
+                                  cls).__new__(cls, *args, **kw)
+        return cls._instance
+
+    def get_detect(self):
+        print('FtpConnDetect-get_detect')
+        return self.is_conn
+
+    def set_detect(self):
+        print('FtpConnDetect-enable_detect')
+        self.is_conn = False
+        self.is_pause = False
+        g_conn_detection_event.set()
+
+    def pause_detect(self):
+        print('FtpConnDetect-pause_detect')
+        self.is_pause = True
+
+    def quit(self):
+        self.quit_event.set()
+        g_conn_detection_event.set()
+
+    def run(self):
+        print('FtpConnDetect-run')
+        g_conn_detection_event.wait()
+        g_conn_detection_event.clear()
+
+        while True:
+            if self.quit_event.is_set():
+                break
+            if self.is_conn == False:
+                if self.is_pause == True:
+                    g_conn_detection_event.wait()
+                    g_conn_detection_event.clear()
+                    continue
+                status, msg, welcome = self.ftpclient.remote_open()
+                if status == 0:
+                    print('conn-detect>> msg:%s, welcome:%s' % (msg, welcome))
+                    self.is_conn = True
+                    g_conn_detection_event.wait()
+                    g_conn_detection_event.clear()
+                else:
+                    sleep(5)
+
+
 def cli():
     ftp_tool = FtpClient()
 
-    #cygwin-mirror
-    #ftp_tool.init_parameter(
+    # cygwin-mirror
+    # ftp_tool.init_parameter(
     #    host='cygwin.mirror.rafal.ca',
     #    username='ftp',
     #    password='orisol@orisol.com',
     #    secure=False,
     #    implicit_TLS=False,
-    #)
+    # )
 
-    # rebex-net
+    # rebex-net - implicit_TLS
     # ftp_tool.init_parameter(
     #     host='test.rebex.net',
-    #     username='demo',
-    #     password='password',
+    #     username='ftp',
+    #     password='ftp',
+    #     secure=True,
+    #     implicit_TLS=True,
+    #     port=990
+    # )
+
+    # rebex-net - explicit_TLS
+    ftp_tool.init_parameter(
+        host='test.rebex.net',
+        username='ftp',
+        password='ftp',
+        secure=True,
+        implicit_TLS=False,
+        working_root='pub/example',
+        port=21
+    )
+
+    # hinet-upload
+    # ftp_tool.init_parameter(
+    #     host='ftp.speed.hinet.net',
+    #     username='ftp',
+    #     password='ftp',
+    #     working_root = '/',
+    #     secure=False,
+    #     implicit_TLS=False,
+    #     port=21,
+    #     connect_timeout=10,
+    # )
+
+    # orisol-nas
+    # ftp_tool.init_parameter(
+    #     host='10.92.2.253',
+    #     username='Orisoltest',
+    #     password='Orisol1234',
     #     secure=True,
     #     implicit_TLS=False,
     # )
 
-    # orisol-nas
-    ftp_tool.init_parameter(
-        host='10.92.2.253',
-        username='Orisoltest',
-        password='Orisol1234',
-        secure=True,
-        implicit_TLS=False,
-    )
+    # ftp_probe = FtpProbe()
+    # ftp_probe.initParam()
+    # ftp_probe.start()
 
-    ftp_probe = FtpProbe()
-    ftp_probe.initParam()
-    ftp_probe.start()
+    ftp_conn_detect = FtpConnDetect()
+    ftp_conn_detect.start()
 
     while True:
         try:
@@ -1380,7 +1600,8 @@ def cli():
 
             if len(cli_input_list) > 0:
                 if cli_input_list[0] == 'q':
-                    ftp_probe.quit()
+                    # ftp_probe.quit()
+                    ftp_conn_detect.quit()
                     ftp_tool.remote_quit()
                     break
 
@@ -1399,7 +1620,8 @@ def cli():
 
                 elif cli_input_list[0] == 'open':
                     status, msg, welcome = ftp_tool.remote_open()
-                    log = ' status:%d, msg:%s, welcome:%s'%(status, msg, welcome)
+                    log = '-----status:%d, msg:%s, welcome:%s' % (
+                        status, msg, welcome)
                     print(log)
 
                 elif cli_input_list[0] == 'close':
@@ -1409,38 +1631,49 @@ def cli():
                     ftp_tool.remote_quit()
 
                 elif cli_input_list[0] == 'ls':
-                    if ftp_tool.Is_need_reconnect():
-                        ftp_tool.remote_open()
+                    if ftp_tool.Is_timeout_reconnect():
+                        ftp_tool.remote_open(change_to_backup=True)
                     if len(cli_input_list) > 1:
-                        status, files = ftp_tool.remote_get_file_list(cli_input_list[1])
+                        status, files = ftp_tool.remote_get_file_list(
+                            cli_input_list[1])
                     else:
                         status, files = ftp_tool.remote_get_file_list()
                     if status == 0:
-                        filelist = []
                         for file in files:
-                            if file['file_type'] == 'DIR':
-                                filelist.append(file['file_name'] + '/')
-                            else:
-                                filelist.append(file['file_name'])
-                        print(filelist)
-                        print('length of filelist:', len(filelist))
+                            log = '%s  %s  %s  %s  %s  %s' % (file['file_permissions'],
+                                                              file['file_name'].ljust(
+                                20),
+                                file['file_path'].ljust(
+                                30),
+                                file['file_type'].ljust(
+                                10),
+                                file['size_human'].ljust(
+                                10),
+                                file['date'].ljust(10))
+                            print(log)
+                        print('length of filelist:', len(files))
 
                 elif cli_input_list[0] == 'mass-download':
                     if len(cli_input_list) == 3:
-                        status, files = ftp_tool.remote_get_file_list(cli_input_list[1])
+                        status, files = ftp_tool.remote_get_file_list(
+                            cli_input_list[1])
                         if status == 0:
-                            ftp_tool.set_bulktag_download_info_cli(src_files=files, dst_mount=cli_input_list[2])
+                            ftp_tool.set_bulktag_download_info_cli(
+                                src_files=files, dst_mount=cli_input_list[2])
                             download_status, escape, msg = ftp_tool.bulk_download()
-                            print('download_status:', download_status, escape, msg)
+                            print('download_status:',
+                                  download_status, escape, msg)
                     else:
                         log = 'cli cmd fault:%s' % (cli_input_list)
                         print(log)
 
                 elif cli_input_list[0] == 'mass-upload':
                     if len(cli_input_list) == 3:
-                        status, src_files = ftp_tool.local_get_file_list_absolute_path(search_path=cli_input_list[1])
+                        status, src_files = ftp_tool.local_get_file_list_absolute_path(
+                            search_path=cli_input_list[1])
                         if status == 0:
-                            ftp_tool.set_bulktag_upload_info_cli(src_files=src_files, dst_mount=cli_input_list[2])
+                            ftp_tool.set_bulktag_upload_info_cli(
+                                src_files=src_files, dst_mount=cli_input_list[2])
                             upload_status, escape, msg = ftp_tool.bulk_upload()
                             print('upload_status:', upload_status, escape, msg)
 
@@ -1450,55 +1683,73 @@ def cli():
 
                 elif cli_input_list[0] == 'mdtm':
                     if len(cli_input_list) > 1:
-                        status, file_date = ftp_tool.remote_get_mdtm(cli_input_list[1])
-                        print('status---',status)
-                        print('file_date---',file_date)
+                        status, file_date = ftp_tool.remote_get_mdtm(
+                            cli_input_list[1])
+                        print('status---', status)
+                        print('file_date---', file_date)
                     else:
-                        print('cli- wrong command, try again:',cli_input_list)
+                        print('cli- wrong command, try again:', cli_input_list)
 
                 elif cli_input_list[0] == 'noop':
                     status = ftp_tool.remote_noop()
+                    # Though some servers ignore the NOOP command.
+                    # Then you will have to send some commands that really do something, like PWD
+                    # like hinet server.
 
                 elif cli_input_list[0] == 'welcome':
-                    status,str_welcome = ftp_tool.remote_welcome()
+                    status, str_welcome = ftp_tool.remote_welcome()
                     if status == 0:
-                        log = '...%s...'%(str_welcome)
+                        log = '...%s...' % (str_welcome)
                         print(log)
 
-                elif cli_input_list[0] == 'start_noop':
-                    ftp_probe.enable(True)
-            
+                # elif cli_input_list[0] == 'probe-start':
+                #     ftp_probe.enable(True)
+
+                # elif cli_input_list[0] == 'probe-stop':
+                #     ftp_probe.enable(False)
+
+                elif cli_input_list[0] == 's':
+                    ftp_conn_detect.set_detect()
+                elif cli_input_list[0] == 'p':
+                    ftp_conn_detect.pause_detect()
+
+                elif cli_input_list[0] == 'g':
+                    status = ftp_conn_detect.get_detect()
+                    print('====status:', status)
+
                 elif cli_input_list[0] == 'pwd':
-                    if ftp_tool.Is_need_reconnect():
-                        ftp_tool.remote_open()
-                    status, remote_pwd = ftp_tool.remote_pwd()
-                    log = 'status=%d, remote_pwd:%s'%(status,remote_pwd)
-                    print(log)
-                    ftp_tool.print_info_working_dir()
-            
+                    if ftp_tool.Is_timeout_reconnect():
+                        ftp_tool.remote_open(change_to_backup=True)
+                    # status, remote_pwd = ftp_tool.remote_pwd()
+                    # log = 'status=%d, remote_pwd:%s'%(status,remote_pwd)
+                    # print(log)
+                    status, folder_info = ftp_tool.get_remote_folder_info()
+                    print('%d, %s' % (status, str(folder_info)))
+
                 elif cli_input_list[0] == 'cd':
-                    if len(cli_input_list)<2:
-                        print('cli- wrong command, try again:',cli_input_list)
+                    if len(cli_input_list) < 2:
+                        print('cli- wrong command, try again:', cli_input_list)
                     else:
-                        status, msg = ftp_tool.remote_change_current_folder(cwd=cli_input_list[1])
-                        log = 'cwd > status:%d, msg:%s'%(status,msg)
+                        status, msg = ftp_tool.remote_change_current_folder(
+                            cwd=cli_input_list[1])
+                        log = 'cwd > status:%d, msg:%s' % (status, msg)
                         print(log)
 
                 elif cli_input_list[0] == 'mkdir':
-                    if len(cli_input_list)<2:
-                        print('cli- wrong command, try again:',cli_input_list)
+                    if len(cli_input_list) < 2:
+                        print('cli- wrong command, try again:', cli_input_list)
                     else:
                         status = ftp_tool.remote_mkdir(cli_input_list[1])
 
                 elif cli_input_list[0] == 'rmdir':
-                    if len(cli_input_list)<2:
-                        print('cli- wrong command, try again:',cli_input_list)
+                    if len(cli_input_list) < 2:
+                        print('cli- wrong command, try again:', cli_input_list)
                     else:
                         status = ftp_tool.remote_rmdir(cli_input_list[1])
 
                 elif cli_input_list[0] == 'rm':
-                    if len(cli_input_list)<2:
-                        print('cli- wrong command, try again:',cli_input_list)
+                    if len(cli_input_list) < 2:
+                        print('cli- wrong command, try again:', cli_input_list)
                     else:
                         status = ftp_tool.remote_rmfile(cli_input_list[1])
 
@@ -1509,9 +1760,9 @@ def cli():
 
                 elif cli_input_list[0] == 'rm-all':
                     # cwd to target directory then rm-all
-                    if len(cli_input_list)<2:
-                        status,files = ftp_tool.remote_get_file_list()
-                        if status==0:
+                    if len(cli_input_list) < 2:
+                        status, files = ftp_tool.remote_get_file_list()
+                        if status == 0:
                             filelist = []
                             for file in files:
                                 if file['file_type'] == 'DIR':
@@ -1521,8 +1772,9 @@ def cli():
                             for file in filelist:
                                 status = ftp_tool.remote_rmfile(file)
                     else:
-                        status,files = ftp_tool.remote_get_file_list(cli_input_list[1])
-                        if status==0:
+                        status, files = ftp_tool.remote_get_file_list(
+                            cli_input_list[1])
+                        if status == 0:
                             filelist = []
                             for file in files:
                                 if file['file_type'] == 'DIR':
@@ -1533,8 +1785,8 @@ def cli():
                                 status = ftp_tool.remote_rmfile(file)
 
                 elif cli_input_list[0] == 'mv':
-                    if len(cli_input_list)<3:
-                        print('cli- wrong command, try again:',cli_input_list)
+                    if len(cli_input_list) < 3:
+                        print('cli- wrong command, try again:', cli_input_list)
                     else:
                         status, msg = ftp_tool.remote_rename(
                             cli_input_list[1], cli_input_list[2])
@@ -1549,14 +1801,16 @@ def cli():
                         # -> and the same filename in remote current folder
                         if len(cli_input_list) == 2:
                             if os.path.split(cli_input_list[1])[0] == '':
-                                status = ftp_tool.remote_upload(cli_input_list[1])
+                                status = ftp_tool.remote_upload(
+                                    cli_input_list[1])
                                 print('status:', status)
 
                             # 1. put <abs_path/filename>
                             # -> copy local absolute path filename to remote current folder
                             # -> and the same filename in remote current folder
                             else:
-                                local_mount, filename = os.path.split(cli_input_list[1])
+                                local_mount, filename = os.path.split(
+                                    cli_input_list[1])
                                 status = ftp_tool.remote_upload(
                                     filename, src_mount=local_mount)
                                 print('status:', status)
@@ -1574,8 +1828,10 @@ def cli():
                             # 5. put <xx/file1>  <yy/>
                             # 6. put <xx/file1>  <yy/file2>
 
-                            local_mount, local_filename = os.path.split( cli_input_list[1])
-                            remote_mount, remote_filename = os.path.split( cli_input_list[2])
+                            local_mount, local_filename = os.path.split(
+                                cli_input_list[1])
+                            remote_mount, remote_filename = os.path.split(
+                                cli_input_list[2])
                             if local_filename == '':
                                 print('local_filename not exist')
                                 continue
@@ -1586,7 +1842,7 @@ def cli():
                                         dst_filename=remote_filename)
                                     print('condition(1), status:', status)
                                 elif (
-                                    local_mount == '' and remote_mount != '' and remote_filename == ''):
+                                        local_mount == '' and remote_mount != '' and remote_filename == ''):
                                     status = ftp_tool.remote_upload(
                                         src_filename=local_filename,
                                         dst_mount=remote_mount)
@@ -1649,7 +1905,8 @@ def cli():
                         # -> and the same filename in remote current folder
                         if len(cli_input_list) == 2:
                             if os.path.split(cli_input_list[1])[0] == '':
-                                status = ftp_tool.remote_download(cli_input_list[1])
+                                status = ftp_tool.remote_download(
+                                    cli_input_list[1])
                                 print('status:', status)
 
                         elif len(cli_input_list) == 3:
@@ -1768,10 +2025,9 @@ def cli():
                                 break
                             else:
                                 ftp_cmd += ' '
-                    print('ftp_cmd:',ftp_cmd)
-                    str_resp = ftp_tool.sendcmd(ftp_cmd)
-                    ftp_tool.update_access_status()
-                    print('str_resp:',str_resp)
+                    str_resp = ftp_tool.remote_command(ftp_cmd)
+                    log = 'ftp_cmd:%s, resp:%s' % (ftp_cmd, str_resp)
+                    print(log)
 
                 elif cli_input_list[0] == 'recur-upload':
                     if len(cli_input_list) == 3:
@@ -1790,7 +2046,8 @@ def cli():
                     print('local current folder:%s' % (local_pwd))
                 elif cli_input_list[0] == 'lls':
                     if len(cli_input_list) > 1:
-                        status, local_filelist = ftp_tool.local_get_file_list(search_path=cli_input_list[1])
+                        status, local_filelist = ftp_tool.local_get_file_list(
+                            search_path=cli_input_list[1])
                     else:
                         status, local_filelist = ftp_tool.local_get_file_list()
                     if status == 0:
@@ -1799,7 +2056,8 @@ def cli():
                     if len(cli_input_list) < 2:
                         print('cli- wrong command, try again:', cli_input_list)
                     else:
-                        status = ftp_tool.local_change_currnet_folder(cli_input_list[1])
+                        status = ftp_tool.local_change_currnet_folder(
+                            cli_input_list[1])
                 else:
                     print('cli- wrong command, try again')
             else:
@@ -1807,6 +2065,7 @@ def cli():
         except KeyboardInterrupt:
             print('key interrupt occur !!!')
             break
+
 
 def main():
     cli()
