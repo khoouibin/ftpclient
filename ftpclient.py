@@ -171,7 +171,7 @@ class FtpClient(ftplib.FTP_TLS):
     continuous_file_numbers = 128
     access_status = -1
     access_timestamp = time()
-    access_diff = 30
+    access_diff = 10
     negative_resp = ['4', '5', '6']
     bulktag = BulkTag()
 
@@ -421,8 +421,9 @@ class FtpClient(ftplib.FTP_TLS):
         # and back to original working path, ignore where ever the current working path.
 
             self.__is_login = True
-            self.working_directory['remote'] = self.remote_pwd()[1]
-            self.working_directory['remote_backup'] = self.working_directory['remote']
+            if change_to_backup == False:
+                self.working_directory['remote'] = self.remote_pwd()[1]
+                self.working_directory['remote_backup'] = self.working_directory['remote']
         else:
             msg = conn_msg
 
@@ -781,6 +782,8 @@ class FtpClient(ftplib.FTP_TLS):
         if cwd == '..':
             dir_token = os.path.split(self.working_directory['remote_backup'])
             tmp_cwd = dir_token[0]
+        elif cwd == '/':
+            tmp_cwd = self.mountpoint
         elif cwd != None:
             tmp_cwd = os.path.join(self.working_directory['remote_backup'], cwd)
 
@@ -1333,9 +1336,9 @@ class FtpClient(ftplib.FTP_TLS):
         err_msg = ''
         self.set_bulktag_info()
         if dst[0] != '/':
-            dst = '/'+dst[:]
+            dst = os.path.join(self.working_directory['remote_backup'],dst)
         start_time = time()
-        status, msg, welcome = self.remote_open()
+        status, msg, welcome = self.remote_open(change_to_backup=True)
         if status != 0:
             err_msg = msg
             escape_time = time() - start_time
@@ -1403,6 +1406,141 @@ class FtpClient(ftplib.FTP_TLS):
         str_resp = self.sendcmd(str_command)
         self.reset_timeout_count()
         return str_resp
+
+    def gen_relative_local_directory(self, local_mountpoint, filepath):
+        filepath_tokens = os.path.split(filepath)[0].split('/')
+        tmp_path = local_mountpoint
+        for token in filepath_tokens:
+            if token == '':
+                continue
+            tmp_path = os.path.join(tmp_path, token)
+            if os.path.exists(tmp_path):
+                continue
+            else:
+                os.mkdir(tmp_path)
+
+    @synchronized
+    def remote_relative_download(self, src_filepaths,
+                                 dst_filepaths=None,
+                                 src_mountpoint=None,
+                                 dst_mountpoint=None):
+        status = -1
+        msg = ''
+        bufsize = 1024
+        remote_mountpoint = ''
+        remote_filepath = ''
+
+        local_mountpoint = ''
+        local_filepath = ''
+
+        if src_mountpoint == None:
+            remote_mountpoint = self.mountpoint
+        else:
+            remote_mountpoint = src_mountpoint
+
+        if dst_mountpoint == None:
+            local_mountpoint = self.local_tmp_directory
+        else:
+            local_mountpoint = dst_mountpoint
+
+        for src_filepath in src_filepaths:
+            remote_filepath = os.path.join(remote_mountpoint, src_filepath)
+            status, info = self.remote_get_file_list(remote_filepath)
+            if status == 0:
+                self.gen_relative_local_directory(
+                    local_mountpoint, src_filepath)
+                local_filepath = os.path.join(local_mountpoint, src_filepath)
+                if not os.path.isdir(local_filepath) and os.path.exists(local_filepath):
+                    os.remove(local_filepath)
+
+                local_f = open(local_filepath, 'wb')
+                try:
+                    cmd = 'RETR %s' % (remote_filepath)
+                    msg = self.retrbinary(
+                        cmd, local_f.write, blocksize=bufsize)
+                    status = 0
+                except (error_perm, Exception, socket.error) as err:
+                    status = -1
+                    if __name__ != '__main__':
+                        orisolLog(level='info', module_name=Module_Name,
+                                  message='remote_relative_download err:%s' % (str(err)))
+                    else:
+                        print(err)
+                    msg = str(err)
+                finally:
+                    local_f.close()
+                    if status == -1:
+                        if not os.path.isdir(local_filepath) and os.path.exists(local_filepath):
+                            os.remove(local_filepath)
+
+        return status, msg
+
+    def gen_relative_remote_directory(self, mountpoint, filepath):
+        filepath_tokens = os.path.split(filepath)[0].split('/')
+        tmp_path = mountpoint
+        for token in filepath_tokens:
+            if token == '':
+                continue
+            tmp_path = os.path.join(tmp_path, token)
+            status, info = self.remote_get_file_list(tmp_path)
+            if status == 0:
+                continue
+            else:
+                status, msg = self.remote_mkdir(tmp_path)
+                if status == -1:
+                    if __name__ != '__main__':
+                        orisolLog(level='info', module_name=Module_Name,
+                                  message='remote_gen_relative_directory err:%s' % (str(msg)))
+                    else:
+                        print(msg)
+
+    @synchronized
+    def remote_relative_upload(self, src_filepaths,
+                               dst_filepaths=None,
+                               src_mountpoint=None,
+                               dst_mountpoint=None):
+        status = -1
+        msg = ''
+        bufsize = 1024
+        remote_mountpoint = ''
+        remote_filepath = ''
+
+        local_mountpoint = ''
+        local_filepath = ''
+
+        if src_mountpoint == None:
+            local_mountpoint = self.local_tmp_directory
+        else:
+            local_mountpoint = src_mountpoint
+
+        if dst_mountpoint == None:
+            remote_mountpoint = self.mountpoint
+        else:
+            remote_mountpoint = dst_mountpoint
+
+        for src_filepath in src_filepaths:
+            local_filepath = os.path.join(local_mountpoint, src_filepath)
+            if os.path.isdir(local_filepath):
+                continue
+            elif not os.path.exists(local_filepath):
+                continue
+            self.gen_relative_remote_directory(remote_mountpoint, src_filepath)
+            remote_filepath = os.path.join(remote_mountpoint, src_filepath)
+            local_f = open(local_filepath, 'rb')
+            try:
+                cmd = 'STOR %s' % (remote_filepath)
+                msg = self.storbinary(cmd, fp=local_f, blocksize=bufsize)
+                status = 0
+            except (error_perm, Exception, socket.error) as err:
+                if __name__ != '__main__':
+                    orisolLog(level='info', module_name=Module_Name,
+                              message='remote_relative_upload err:%s' % (str(err)))
+                else:
+                    print('remote_relative_upload err:', err)
+                msg = str(err)
+            finally:
+                local_f.close()
+        return status, msg
 
 
 def cli_help():
@@ -1572,7 +1710,7 @@ def cli():
         secure=True,
         implicit_TLS=False,
         connect_timeout=6,
-        mountpoint='/Test/wade/',
+        mountpoint='/Test/',
     )
 
     # ftp_probe = FtpProbe()
@@ -1628,6 +1766,7 @@ def cli():
                     else:
                         status, files = ftp_tool.remote_get_file_list()
                     if status == 0:
+                        print('-----------------------------------------------------------------')
                         for file in files:
                             log = '%s  %s  %s  %s  %s  %s' % (file['file_permissions'],
                                                               file['file_name'].ljust(
@@ -2005,6 +2144,29 @@ def cli():
                                         dst_filename=local_filename,
                                     )
                                     print('condition(6), status:', status)
+                elif cli_input_list[0] == 'gets':
+                    # gets uploadtest/ori.pgs downloadtest/99.ppi
+                    if len(cli_input_list) < 2:
+                        print('cli- wrong command, try again:', cli_input_list)
+                    else:
+                        filepaths = []
+                        for idx, item in enumerate(cli_input_list):
+                            if idx > 0:
+                                filepaths.append(item)
+                        ftp_tool.remote_open(change_to_backup=True)
+                        ftp_tool.remote_relative_download(filepaths)
+                elif cli_input_list[0] == 'getx':
+                    # gets uploadtest/ori.pgs downloadtest/99.ppi
+                    filepaths = ['wade/uploadtest/ori.pgs',
+                                 'wade/downloadtest/99.ppi']
+                    ftp_tool.remote_open(change_to_backup=True)
+                    ftp_tool.remote_relative_download(filepaths)
+                elif cli_input_list[0] == 'putx':
+                    # gets uploadtest/ori.pgs downloadtest/99.ppi
+                    filepaths = ['wade/F01.01/filemanager.py',
+                                 'wade/F02.02/thumbnail.py']
+                    ftp_tool.remote_open(change_to_backup=True)
+                    ftp_tool.remote_relative_upload(filepaths)
 
                 elif cli_input_list[0] == 'cmd':
                     ftp_cmd = ''
