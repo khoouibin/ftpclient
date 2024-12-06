@@ -11,6 +11,7 @@ import threading
 import shutil
 import math
 import json
+from ssl import SSLSocket
 
 if __name__ != '__main__':
     try:
@@ -137,6 +138,10 @@ class BulkTag():
         return len(self.dst_filename_list)
 
 
+class ReusedSslSocket(SSLSocket):
+    def unwrap(self):
+        pass
+
 class FtpClient(ftplib.FTP_TLS):
     # class FtpClient(ftplib.FTP):
     # host = '10.92.2.253'
@@ -257,6 +262,35 @@ class FtpClient(ftplib.FTP_TLS):
             print(log3)
             print(log4)
 
+    def remote_set_host(self, host):
+        self.host = host
+
+    def remote_set_username(self, username):
+        self.username = username
+
+    def remote_set_password(self, password):
+        self.password = password
+
+    def remote_set_port(self, port):
+        self.port = int(port)
+
+    def remote_set_mountpoint(self, mountpoint):
+        self.mountpoint = mountpoint
+
+    def remote_print_parameter(self):
+        log1 = (
+            'host:%s,\nusername=%s,\npassword=%s,\nport=%d,\nimplicit_TLS=%d, secure=%d'
+            % (
+                self.host,
+                self.username,
+                self.password,
+                self.port,
+                self.implicit_TLS,
+                self.secure,
+            )
+        )
+        print(log1)
+
     def filename_parsing(self, str_list, str_idx, attr=None):
         _str = ''
         for idx, str_tmp in enumerate(str_list):
@@ -270,6 +304,17 @@ class FtpClient(ftplib.FTP_TLS):
             _str = "".join(_str_link.rstrip().lstrip())
 
         return _str
+# https://stackoverflow.com/questions/14659154/ftps-with-python-ftplib-session-reuse-required
+
+    def ntransfercmd(self, cmd, rest=None):
+        print('------ntransfercmd-wrap----------------1')
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(conn,
+                                            server_hostname=self.host,
+                                            session=self.sock.session)
+            conn.__class__ = ReusedSslSocket
+        return conn, size
 
     def remote_connect(self):
         self.access_status = -1
@@ -389,9 +434,16 @@ class FtpClient(ftplib.FTP_TLS):
                     message='extension:%s' % (str(str_resp),))
             else:
                 print('support extions:', str(str_resp))
+
             if any("UTF8" in s for s in str_resp):
                 self.encoding = 'utf-8'  # ftplib encoding (Latin-1 -> UTF-8)
                 self.sendcmd('OPTS UTF8 ON')
+
+            if any("CLNT" in s for s in str_resp):
+                self.sendcmd('CLNT ORISOL-TW')
+
+            if any("PROT" in s for s in str_resp):
+                self.remote_prot_p()
 
             status = 0
 
@@ -413,7 +465,8 @@ class FtpClient(ftplib.FTP_TLS):
         status, conn_msg = self.remote_connect()
         if status == 0:
             if self.secure == True and self.implicit_TLS == False:
-                self.remote_prot_p()
+                pass
+
             status, msg = self.remote_login()
             status = self.remote_extension_support()
 
@@ -1545,11 +1598,21 @@ class FtpClient(ftplib.FTP_TLS):
 
 def cli_help():
     help_doc = ''
-    help_doc += 'q : quit program'+os.linesep
-    help_doc += 'tx: send data to serial port'+os.linesep
-    help_doc += '    (1) tx str xxxxx xxx'+os.linesep
-    help_doc += '    (2) tx hex 12 34 56 78'+os.linesep
-    help_doc += 'set lc12s -setting parameter for lc12s'
+    help_doc += '=====   command line help list   ====='+os.linesep
+    help_doc += ' > "open"           : open and login ftp server'+os.linesep
+    help_doc += ' > "ls"             : lists directory contents of files and directories'+os.linesep
+    help_doc += ' > "cd"             : change current directory'+os.linesep
+    help_doc += ' > "pwd"            : print current working directory'+os.linesep
+    help_doc += ' > "mkdir"          : create a new directory'+os.linesep
+    help_doc += ' > "rmdir"          : remove a directory'+os.linesep
+    help_doc += ' > "rm"             : remove a file'+os.linesep
+    help_doc += ' > "cdup"           : change wroking direcotry to parent directory'+os.linesep
+    help_doc += ' > "put"            : upload file from local to remote'+os.linesep
+    help_doc += ' > "get"            : download file from remote to local'+os.linesep
+    help_doc += ' > "recur-upload"   : upload file and directory from local to remote recursively'+os.linesep
+    help_doc += ' > "recur-download" : download file and directory from remote to local recursively'+os.linesep
+    help_doc += ' > "recur-remove"   : delete file and directory from remote recursively'+os.linesep
+    help_doc += '=====   end of command line help list   ====='
     print(help_doc)
 
 
@@ -1680,15 +1743,15 @@ def cli():
     # )
 
     # rebex-net - explicit_TLS
-    # ftp_tool.init_parameter(
-    #     host='test.rebex.net',
-    #     username='ftp',
-    #     password='ftp',
-    #     secure=True,
-    #     implicit_TLS=False,
-    #     mountpoint='pub/example',
-    #     port=21
-    # )
+    ftp_tool.init_parameter(
+        host='test.rebex.net',
+        username='ftp',
+        password='ftp',
+        secure=True,
+        implicit_TLS=False,
+        mountpoint='pub/example',
+        port=21
+    )
 
     # hinet-upload
     # ftp_tool.init_parameter(
@@ -1703,15 +1766,25 @@ def cli():
     # )
 
     # orisol-nas
-    ftp_tool.init_parameter(
-        host='10.92.2.253',
-        username='Orisoltest',
-        password='Orisol1234',
-        secure=True,
-        implicit_TLS=False,
-        connect_timeout=6,
-        mountpoint='/Test/',
-    )
+    # ftp_tool.init_parameter(
+    #     host='10.92.2.253',
+    #     username='Orisoltest',
+    #     password='Orisol1234',
+    #     secure=True,
+    #     implicit_TLS=False,
+    #     connect_timeout=6,
+    #     mountpoint='/Test/',
+    # )
+
+    # ftp_tool.init_parameter(
+    #     host='ftp.swfwmd.state.fl.us',
+    #     username='anonymous',
+    #     password='any@gmail.com',
+    #     secure=True,
+    #     implicit_TLS=False,
+    #     connect_timeout=6,
+    #     mountpoint='/',
+    # )
 
     # ftp_probe = FtpProbe()
     # ftp_probe.initParam()
@@ -1734,6 +1807,34 @@ def cli():
 
                 elif cli_input_list[0] == 'help':
                     cli_help()
+
+                elif cli_input_list[0] == 'host':
+                    if len(cli_input_list) > 1:
+                        ftp_tool.remote_set_host(
+                            cli_input_list[1])
+
+                elif cli_input_list[0] == 'user':
+                    if len(cli_input_list) > 1:
+                        ftp_tool.remote_set_username(
+                            cli_input_list[1])
+
+                elif cli_input_list[0] == 'pass':
+                    if len(cli_input_list) > 1:
+                        ftp_tool.remote_set_password(
+                            cli_input_list[1])
+
+                elif cli_input_list[0] == 'port':
+                    if len(cli_input_list) > 1:
+                        ftp_tool.remote_set_port(
+                            cli_input_list[1])
+
+                elif cli_input_list[0] == 'mount':
+                    if len(cli_input_list) > 1:
+                        ftp_tool.remote_set_mountpoint(
+                            cli_input_list[1])
+
+                elif cli_input_list[0] == 'show-para':
+                    ftp_tool.remote_print_parameter()
 
                 elif cli_input_list[0] == 'conn':
                     status, msg = ftp_tool.remote_connect()
