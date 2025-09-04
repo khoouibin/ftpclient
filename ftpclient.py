@@ -13,6 +13,8 @@ import math
 import json
 from ssl import SSLSocket
 
+import paramiko.sftp_client
+
 if __name__ != '__main__':
     try:
         from uhf_host_common.interface.logger_client import orisolLog
@@ -1749,7 +1751,7 @@ def cli():
         password='ftp',
         secure=True,
         implicit_TLS=False,
-        mountpoint='pub/example',
+        mountpoint='/',
         port=21
     )
 
@@ -2319,9 +2321,55 @@ def cli():
             print('key interrupt occur !!!')
             break
 
+import warnings
+warnings.filterwarnings(action='ignore',module='.*paramiko.*')
+import paramiko, stat
+
+def ssh_cli():
+    hostname='test.rebex.net'
+    port=22
+    username='demo'
+    password='password'
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(hostname,port,username,password,allow_agent=False,look_for_keys=False)
+
+    transport = ssh.get_transport()
+    transport.set_keepalive(10)
+
+    sftp = ssh.open_sftp()
+    src = '/'
+    file_list = sftp.listdir_attr(src)
+    for item in file_list:
+        print('item:',item,type(item))
+
+    for item in file_list:
+        file_permissions = str(item)[0:10]
+        print('file_permissions:',file_permissions)
+
+    for item in file_list:
+        print(item.filename)
+
+    # for item in file_list:
+    #     src_item = os.path.join(src,item.filename)
+    #     dst_item = os.path.join(os.getcwd(),item.filename)
+    #     sftp.get(src_item,dst_item)
+    #     print('src_item:',src_item)
+    #     print('dst_item:',dst_item)
+    # i = 0
+    # while(1):
+    #     print('i=%d'%(i))
+    #     i+=1
+    #     sleep(1)
+    
+    ssh.close()
+
+
+
 
 def main():
-    cli()
+    ssh_cli()
+    #cli()
     sys.exit(0)
 
 
