@@ -12,6 +12,9 @@ import shutil
 import math
 import json
 from ssl import SSLSocket
+from datetime import datetime
+import locale
+
 
 if __name__ != '__main__':
     try:
@@ -136,7 +139,6 @@ class BulkTag():
 
     def get_length_dst_filelist(self):
         return len(self.dst_filename_list)
-
 
 class ReusedSslSocket(SSLSocket):
     def unwrap(self):
@@ -264,19 +266,14 @@ class FtpClient(ftplib.FTP_TLS):
 
     def remote_set_host(self, host):
         self.host = host
-
     def remote_set_username(self, username):
         self.username = username
-
     def remote_set_password(self, password):
         self.password = password
-
     def remote_set_port(self, port):
         self.port = int(port)
-
     def remote_set_mountpoint(self, mountpoint):
         self.mountpoint = mountpoint
-
     def remote_print_parameter(self):
         log1 = (
             'host:%s,\nusername=%s,\npassword=%s,\nport=%d,\nimplicit_TLS=%d, secure=%d'
@@ -304,16 +301,14 @@ class FtpClient(ftplib.FTP_TLS):
             _str = "".join(_str_link.rstrip().lstrip())
 
         return _str
-# https://stackoverflow.com/questions/14659154/ftps-with-python-ftplib-session-reuse-required
 
     def ntransfercmd(self, cmd, rest=None):
-        print('------ntransfercmd-wrap----------------1')
-        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        conn, size = ftplib.FTP.ntransfercmd(self,cmd,rest)
         if self._prot_p:
             conn = self.context.wrap_socket(conn,
-                                            server_hostname=self.host,
-                                            session=self.sock.session)
-            conn.__class__ = ReusedSslSocket
+                server_hostname=self.host,
+                session=self.sock.session)
+            # conn.__class__=ReusedSslSocket
         return conn, size
 
     def remote_connect(self):
@@ -441,9 +436,7 @@ class FtpClient(ftplib.FTP_TLS):
 
             if any("CLNT" in s for s in str_resp):
                 self.sendcmd('CLNT ORISOL-TW')
-
-            if any("PROT" in s for s in str_resp):
-                self.remote_prot_p()
+            self.remote_prot_p()
 
             status = 0
 
@@ -465,8 +458,8 @@ class FtpClient(ftplib.FTP_TLS):
         status, conn_msg = self.remote_connect()
         if status == 0:
             if self.secure == True and self.implicit_TLS == False:
+                #self.remote_prot_p()
                 pass
-
             status, msg = self.remote_login()
             status = self.remote_extension_support()
 
@@ -499,6 +492,14 @@ class FtpClient(ftplib.FTP_TLS):
     def remote_close(self):
         self.close()
         return 0
+
+    def remote_modify_timestamp(self, dst_path):
+        locale.setlocale(locale.LC_TIME, "en_US.UTF-8")
+        now = datetime.now()
+        str_timestamp = '{}'.format(now.strftime('%Y%m%d%H%M%S'))
+        str_cmd = 'MFMT %s %s'%(str_timestamp, dst_path)
+        print(str_cmd)
+        self.remote_command(str_cmd)
 
     def reset_timeout_count(self, status=0):
         self.access_timestamp = time()
@@ -1313,6 +1314,7 @@ class FtpClient(ftplib.FTP_TLS):
                             if retry_cnt == 0:
                                 mass_transmmit_stop = 1
                     else:
+                        self.remote_modify_timestamp(sub_dst)
                         break
 
         if mass_transmmit_stop == 0:
@@ -1743,15 +1745,15 @@ def cli():
     # )
 
     # rebex-net - explicit_TLS
-    ftp_tool.init_parameter(
-        host='test.rebex.net',
-        username='ftp',
-        password='ftp',
-        secure=True,
-        implicit_TLS=False,
-        mountpoint='pub/example',
-        port=21
-    )
+    # ftp_tool.init_parameter(
+    #     host='test.rebex.net',
+    #     username='ftp',
+    #     password='ftp',
+    #     secure=True,
+    #     implicit_TLS=False,
+    #     mountpoint='pub/example',
+    #     port=21
+    # )
 
     # hinet-upload
     # ftp_tool.init_parameter(
@@ -1766,20 +1768,20 @@ def cli():
     # )
 
     # orisol-nas
-    # ftp_tool.init_parameter(
-    #     host='10.92.2.253',
-    #     username='Orisoltest',
-    #     password='Orisol1234',
-    #     secure=True,
-    #     implicit_TLS=False,
-    #     connect_timeout=6,
-    #     mountpoint='/Test/',
-    # )
+    ftp_tool.init_parameter(
+        host='10.92.2.253',
+        username='Orisoltest',
+        password='Orisol1234',
+        secure=True,
+        implicit_TLS=False,
+        connect_timeout=6,
+        mountpoint='/Test/',
+    )
 
     # ftp_tool.init_parameter(
-    #     host='ftp.swfwmd.state.fl.us',
-    #     username='anonymous',
-    #     password='any@gmail.com',
+    #     host='172.17.5.100',
+    #     username='pcagyyaons',
+    #     password='123456Ab*',
     #     secure=True,
     #     implicit_TLS=False,
     #     connect_timeout=6,
@@ -1848,7 +1850,7 @@ def cli():
 
                 elif cli_input_list[0] == 'open':
                     status, msg, welcome = ftp_tool.remote_open()
-                    log = '-----status:%d, msg:%s, welcome:%s' % (
+                    log = 'status:%d, msg:%s, welcome:%s' % (
                         status, msg, welcome)
                     print(log)
 
